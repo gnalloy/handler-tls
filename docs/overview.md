@@ -20,10 +20,12 @@ This module provides Pipeline handlers. A handler observes, transforms, rejects,
 - `gnalloy.org/handler-tls/provider/standard` (`standard`)
 
 ## Direct Gnalloy Dependencies
+
 - `gnalloy.org/gnalloy`
 
-## Direct Dependents in the Current Module Plan
-- `gnalloy.org/benchmarks`
+## Direct Dependents in the Current Repository Set
+
+- No repository in the current local Gnalloy set directly depends on this module.
 
 ## Architecture Position
 

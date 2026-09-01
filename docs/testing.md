@@ -19,8 +19,13 @@ Run focused tests while working on a small behavior change:
 GOWORK=off GOTOOLCHAIN=local go test ./... -run 'TestName' -count=1
 ```
 
-Current discovered test and benchmark entry points:
-- `BenchmarkCopyReadableBytesComposite`
+## Discovered Test Entry Points
+
+This inventory is generated from the current `_test.go` files in this repository. It is intentionally complete so documentation review can catch stale test, benchmark, fuzz, and example coverage when code changes.
+
+Total discovered entry points: 41.
+
+### Tests (40)
 - `TestCipherSuiteCatalogIncludesRuntimeSuites`
 - `TestCipherSuiteCatalogReportsCertificateAuth`
 - `TestCipherSuiteCatalogRequiresInsecureOptIn`
@@ -32,6 +37,44 @@ Current discovered test and benchmark entry points:
 - `TestEvaluateNativeProviderRequiresTLS13ALPNAndQUIC`
 - `TestEvaluateProviderDoesNotRequireQUICPacketProtection`
 - `TestEvaluateProviderRejectsTypedNil`
+- `TestHandlerEmitsStapledOCSPResponse`
+- `TestHandlerFlushesRepeatedApplicationWrites`
+- `TestHandlerNegotiatesAndPassesPlaintext`
+- `TestHandlerNegotiatesConfiguredCipherSuites`
+- `TestHandlerNegotiatesConfiguredTLSVersions`
+- `TestHandlerRejectsUnsupportedProvider`
+- `TestHandlerRequiresOCSPStapleRejectsMissingResponse`
+- `TestHandlerSchedulesBackgroundDrainOnOwnerLoop`
+- `TestHandlerUsesConfiguredProvider`
+- `TestHandlerVerifyPeerNameRejectsMismatchedCertificate`
+- `TestInspectClientHelloParsesSNIAndALPN`
+- `TestLookupCipherSuiteIDHonorsInsecureOptIn`
+- `TestMemoryConnCloseReleasesQueuedInput`
+- `TestMemoryConnNotifiesWhenCiphertextIsReady`
+- `TestMemoryConnReleasesInputAfterRead`
+- `TestNewUsesCustomName`
+- `TestOptionalHandlerDetectsTLSAndFiresStartEvent`
+- `TestOptionalHandlerPassesPlaintextWithoutStartingTLS`
+- `TestParseCipherSuitesAcceptsJavaOpenSSLandHexNames`
+- `TestParseCipherSuitesDeduplicatesAliases`
+- `TestParseCipherSuitesRejectsInsecureByDefault`
+- `TestParseCipherSuitesRejectsUnknownName`
+- `TestProviderCapabilities`
+- `TestProviderClonesTLSConfig`
+- `TestProviderImplementsTLSProvider`
+- `TestProviderRejectsNilConn`
+- `TestServerConfigWithClientHelloProviderSelectsConfig`
+- `TestServerConfigWithSNISelectsDomainConfig`
+- `TestStartTLSPassesPlaintextUntilStartEvent`
+
+### Benchmarks (1)
+- `BenchmarkCopyReadableBytesComposite`
+
+### Fuzz Targets (0)
+- No Fuzz targets are currently declared.
+
+### Examples (0)
+- No Example functions are currently declared.
 
 ## Race Checks
 
