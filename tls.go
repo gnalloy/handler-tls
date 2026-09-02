@@ -496,13 +496,7 @@ func (h *Handler) writeCipher(ctx *channel.HandlerContext, chunk *byteChunk, flu
 	} else {
 		err = ctx.Write(out)
 	}
-	if err != nil {
-		if out.RefCnt() > 0 {
-			out.Release()
-		}
-		return err
-	}
-	return nil
+	return err
 }
 
 func (h *Handler) firePlain(ctx *channel.HandlerContext, chunk *byteChunk) error {
