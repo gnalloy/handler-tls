@@ -12,15 +12,17 @@ func TestCloseReleasesQueuedApplicationBuffers(t *testing.T) {
 	buf := buffer.NewOwnedBuffer([]byte("queued"), func([]byte) {
 		released++
 	})
-	handler.pending.Add(1)
-	handler.app <- buf
+	queued, err := handler.pendingApplication.enqueue(buf)
+	if err != nil || !queued {
+		t.Fatalf("enqueue queued=%v err=%v", queued, err)
+	}
 
 	handler.close()
 
 	if released != 1 {
 		t.Fatalf("released=%d, want 1", released)
 	}
-	if pending := handler.pending.Load(); pending != 0 {
+	if pending := handler.pendingApplication.len(); pending != 0 {
 		t.Fatalf("pending=%d, want 0", pending)
 	}
 }

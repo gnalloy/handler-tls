@@ -273,10 +273,13 @@ func TestHandlerSchedulesBackgroundDrainOnOwnerLoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler.raw = newMemoryConn(handler.bytePool, handler.notifyDrain)
+	handler.raw.setNonblocking()
+	handler.conn = &steadyStateConn{readData: []byte("late")}
 	handler.started.Store(true)
 	handler.activated.Store(true)
+	handler.handshake = true
+	handler.handshakeComplete.Store(true)
 
-	handler.plain <- newByteChunk(copyBytes([]byte("late"), handler.bytePool), handler.bytePool)
 	handler.notifyDrain()
 	if recorder.buf.Len() != 0 {
 		t.Fatalf("drain ran outside owner loop: len=%d", recorder.buf.Len())

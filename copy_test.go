@@ -2,6 +2,8 @@ package tls
 
 import (
 	"bytes"
+	"errors"
+	"net"
 	"testing"
 
 	"gnalloy.org/gnalloy/buffer"
@@ -126,6 +128,21 @@ func TestMemoryConnNotifiesWhenCiphertextIsReady(t *testing.T) {
 	case <-notified:
 	default:
 		t.Fatal("ciphertext write did not notify drain")
+	}
+}
+
+func TestMemoryConnReturnsTemporaryErrorInNonblockingMode(t *testing.T) {
+	conn := newMemoryConn(nil, nil)
+	conn.setNonblocking()
+
+	var dst [1]byte
+	_, err := conn.Read(dst[:])
+	if !errors.Is(err, errWouldBlock) {
+		t.Fatalf("err=%v, want errWouldBlock", err)
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Temporary() || netErr.Timeout() {
+		t.Fatalf("err=%v, want temporary non-timeout network error", err)
 	}
 }
 

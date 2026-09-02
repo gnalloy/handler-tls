@@ -58,21 +58,19 @@ type Handler struct {
 	raw  *memoryConn
 	conn Conn
 
-	startOnce sync.Once
-	closeOnce sync.Once
-	closed    chan struct{}
-	ready     chan struct{}
-	plain     chan byteChunk
-	app       chan buffer.ByteBuf
-	events    chan any
-	errs      chan error
-	notify    chan struct{}
-	bytePool  BytePool
-	pending   atomic.Int64
-	ctx       atomic.Pointer[channel.HandlerContext]
-	draining  atomic.Int32
-	scheduled atomic.Bool
-	activated atomic.Bool
+	startOnce          sync.Once
+	closeOnce          sync.Once
+	closed             chan struct{}
+	events             chan any
+	errs               chan error
+	notify             chan struct{}
+	bytePool           BytePool
+	pendingApplication applicationQueue
+	ctx                atomic.Pointer[channel.HandlerContext]
+	draining           atomic.Int32
+	scheduled          atomic.Bool
+	activated          atomic.Bool
+	handshakeComplete  atomic.Bool
 
 	handshake bool
 	active    bool
@@ -92,9 +90,6 @@ func newHandler(mode Mode, cfg Config) *Handler {
 		mode:     mode,
 		cfg:      cfg,
 		closed:   make(chan struct{}),
-		ready:    make(chan struct{}),
-		plain:    make(chan byteChunk, 32),
-		app:      make(chan buffer.ByteBuf, 32),
 		events:   make(chan any, 8),
 		errs:     make(chan error, 8),
 		notify:   make(chan struct{}, 1),
@@ -116,6 +111,7 @@ func (h *Handler) HandlerAdded(ctx *channel.HandlerContext) error {
 func (h *Handler) HandlerRemoved(*channel.HandlerContext) error {
 	h.ctx.Store(nil)
 	h.close()
+	h.releaseCiphertext()
 	return nil
 }
 
@@ -157,6 +153,7 @@ func (h *Handler) ChannelRead(ctx *channel.HandlerContext, msg any) {
 
 func (h *Handler) ChannelInactive(ctx *channel.HandlerContext) {
 	h.close()
+	h.releaseCiphertext()
 	ctx.FireChannelInactive()
 }
 
@@ -173,13 +170,18 @@ func (h *Handler) Write(ctx *channel.HandlerContext, msg any) error {
 		return nil
 	}
 	h.ensureStarted()
-	h.pending.Add(1)
-	select {
-	case h.app <- buf:
-	case <-h.closed:
-		h.pending.Add(-1)
+	queued, err := h.pendingApplication.enqueue(buf)
+	if err != nil {
 		buf.Release()
-		return io.ErrClosedPipe
+		return err
+	}
+	if queued {
+		h.drain(ctx, drainOptions{})
+		return nil
+	}
+	if err := h.writeApplication(buf); err != nil {
+		h.fail(ctx, err)
+		return err
 	}
 	h.drain(ctx, drainOptions{})
 	return nil
@@ -209,6 +211,7 @@ func (h *Handler) Close(ctx *channel.HandlerContext) error {
 		return ctx.Close()
 	}
 	h.drain(ctx, drainOptions{flush: true})
+	h.releaseCiphertext()
 	return ctx.Close()
 }
 
@@ -230,7 +233,6 @@ func (h *Handler) ensureStarted() {
 		h.conn = conn
 		h.started.Store(true)
 		go h.runHandshake()
-		go h.runWriter()
 	})
 }
 
@@ -292,9 +294,8 @@ func (h *Handler) runHandshake() {
 	if emitOCSPEvent {
 		h.events <- ocspEvent
 	}
-	close(h.ready)
+	h.raw.setNonblocking()
 	h.notifyDrain()
-	h.runReader()
 }
 
 func verifyPeerName(state cryptotls.ConnectionState, name string) error {
@@ -302,55 +303,6 @@ func verifyPeerName(state cryptotls.ConnectionState, name string) error {
 		return ErrPeerCertificateUnavailable
 	}
 	return state.PeerCertificates[0].VerifyHostname(name)
-}
-
-func (h *Handler) runReader() {
-	var scratch [16 * 1024]byte
-	for {
-		n, err := h.conn.Read(scratch[:])
-		if n > 0 {
-			chunk := newByteChunk(copyBytes(scratch[:n], h.bytePool), h.bytePool)
-			select {
-			case h.plain <- chunk:
-				h.notifyDrain()
-			case <-h.closed:
-				chunk.releaseOwned()
-				return
-			}
-		}
-		if err == nil {
-			continue
-		}
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
-			return
-		}
-		h.sendErr(err)
-		return
-	}
-}
-
-func (h *Handler) runWriter() {
-	select {
-	case <-h.ready:
-	case <-h.closed:
-		return
-	}
-	for {
-		select {
-		case buf := <-h.app:
-			if err := writeTLSBuffer(h.conn, buf); err != nil {
-				buf.Release()
-				h.pending.Add(-1)
-				h.sendErr(err)
-				return
-			}
-			buf.Release()
-			h.pending.Add(-1)
-			h.notifyDrain()
-		case <-h.closed:
-			return
-		}
-	}
 }
 
 type drainOptions struct {
@@ -372,37 +324,33 @@ func (h *Handler) drain(ctx *channel.HandlerContext, opts drainOptions) {
 		}
 		return
 	}
-	deadline := time.Now().Add(drainWaitTimeout)
-	progressed := false
+	var deadline time.Time
+	if opts.wait && !h.handshakeComplete.Load() {
+		deadline = time.Now().Add(drainWaitTimeout)
+	}
+	readComplete := false
 	for {
 		drained := false
-		select {
-		case chunk := <-h.raw.out:
+		for {
+			chunk, ok := h.raw.popOutput()
+			if !ok {
+				break
+			}
 			drained = true
 			if err := h.writeCipher(ctx, &chunk); err != nil {
 				chunk.releaseOwned()
 				h.fail(ctx, err)
 				return
 			}
-		default:
-		}
-		if opts.plain {
-			select {
-			case chunk := <-h.plain:
-				drained = true
-				if err := h.firePlain(ctx, &chunk); err != nil {
-					chunk.releaseOwned()
-					h.fail(ctx, err)
-					return
-				}
-			default:
-			}
 		}
 		select {
 		case event := <-h.events:
 			drained = true
 			if _, ok := event.(HandshakeEvent); ok {
-				h.handshake = true
+				if err := h.finishHandshake(); err != nil {
+					h.fail(ctx, err)
+					return
+				}
 			}
 			ctx.FireUserEventTriggered(event)
 			if h.handshake && !h.active {
@@ -417,32 +365,95 @@ func (h *Handler) drain(ctx *channel.HandlerContext, opts drainOptions) {
 			return
 		default:
 		}
+		if opts.plain && h.handshakeComplete.Load() {
+			read, err := h.readPlain(ctx)
+			if err != nil {
+				h.fail(ctx, err)
+				return
+			}
+			if read {
+				drained = true
+				readComplete = true
+			}
+		}
 		if drained {
-			progressed = true
 			continue
 		}
-		if !opts.wait || time.Now().After(deadline) {
+		if deadline.IsZero() || time.Now().After(deadline) {
 			break
 		}
-		if h.pending.Load() == 0 {
-			select {
-			case <-h.notify:
-				continue
-			default:
-			}
-			if progressed || !opts.plain {
-				break
-			}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
 		}
+		timer := time.NewTimer(remaining)
 		select {
 		case <-h.notify:
-		case <-time.After(time.Until(deadline)):
+			if !timer.Stop() {
+				<-timer.C
+			}
+		case <-timer.C:
 		case <-h.closed:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 			return
 		}
 	}
+	if readComplete {
+		ctx.FireChannelReadComplete()
+	}
 	if opts.flush {
 		_ = ctx.Flush()
+	}
+}
+
+func (h *Handler) finishHandshake() error {
+	h.handshake = true
+	buffers := h.pendingApplication.markReady()
+	h.handshakeComplete.Store(true)
+	for i, buf := range buffers {
+		if err := h.writeApplication(buf); err != nil {
+			for _, pending := range buffers[i+1:] {
+				pending.Release()
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *Handler) writeApplication(buf buffer.ByteBuf) error {
+	err := writeTLSBuffer(h.conn, buf)
+	buf.Release()
+	return err
+}
+
+func (h *Handler) readPlain(ctx *channel.HandlerContext) (bool, error) {
+	read := false
+	for {
+		data := acquireBytes(h.bytePool, defaultBytePoolBufferSize)
+		n, err := h.conn.Read(data)
+		if n > 0 {
+			chunk := newByteChunk(data[:n], h.bytePool)
+			if fireErr := h.firePlain(ctx, &chunk); fireErr != nil {
+				chunk.releaseOwned()
+				return read, fireErr
+			}
+			read = true
+		} else {
+			releaseBytes(h.bytePool, data)
+		}
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, errWouldBlock) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
+			return read, nil
+		}
+		return read, err
 	}
 }
 
@@ -466,7 +477,6 @@ func (h *Handler) firePlain(ctx *channel.HandlerContext, chunk *byteChunk) error
 		return nil
 	}
 	ctx.FireChannelRead(out)
-	ctx.FireChannelReadComplete()
 	return nil
 }
 
@@ -507,18 +517,17 @@ func (h *Handler) scheduleDrain() {
 }
 
 func (h *Handler) hasQueuedDrain() bool {
-	if h.raw != nil && len(h.raw.out) > 0 {
+	if h.raw != nil && h.raw.hasOutput() {
 		return true
 	}
-	return len(h.plain) > 0 ||
-		len(h.events) > 0 ||
+	return len(h.events) > 0 ||
 		len(h.errs) > 0
 }
 
 func (h *Handler) close() {
 	h.closeOnce.Do(func() {
 		close(h.closed)
-		h.drainApp()
+		h.releasePendingApplication()
 		if h.conn != nil {
 			_ = h.conn.Close()
 		}
@@ -528,17 +537,15 @@ func (h *Handler) close() {
 	})
 }
 
-func (h *Handler) drainApp() {
-	for {
-		select {
-		case buf := <-h.app:
-			if buf != nil {
-				buf.Release()
-				h.pending.Add(-1)
-			}
-		default:
-			return
-		}
+func (h *Handler) releasePendingApplication() {
+	for _, buf := range h.pendingApplication.close() {
+		buf.Release()
+	}
+}
+
+func (h *Handler) releaseCiphertext() {
+	if h.raw != nil {
+		h.raw.releaseOutput()
 	}
 }
 
