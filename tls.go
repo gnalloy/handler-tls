@@ -156,15 +156,32 @@ func (h *Handler) ChannelInactive(ctx *channel.HandlerContext) {
 }
 
 func (h *Handler) Write(ctx *channel.HandlerContext, msg any) error {
+	return h.write(ctx, msg, false)
+}
+
+func (h *Handler) WriteAndFlush(ctx *channel.HandlerContext, msg any) error {
+	return h.write(ctx, msg, true)
+}
+
+func (h *Handler) write(ctx *channel.HandlerContext, msg any, flush bool) error {
 	if h.cfg.StartTLS && !h.started.Load() {
+		if flush {
+			return ctx.WriteAndFlush(msg)
+		}
 		return ctx.Write(msg)
 	}
 	buf, ok := msg.(buffer.ByteBuf)
 	if !ok {
+		if flush {
+			return ctx.WriteAndFlush(msg)
+		}
 		return ctx.Write(msg)
 	}
 	if buf.ReadableBytes() == 0 {
 		buf.Release()
+		if flush {
+			return ctx.Flush()
+		}
 		return nil
 	}
 	h.ensureStarted()
@@ -174,14 +191,16 @@ func (h *Handler) Write(ctx *channel.HandlerContext, msg any) error {
 		return err
 	}
 	if queued {
-		h.drain(ctx, drainOptions{})
+		h.drain(ctx, drainOptions{flush: flush, wait: flush})
 		return nil
 	}
+	h.draining.Add(1)
+	defer h.finishDrain()
 	if err := h.writeApplication(buf); err != nil {
 		h.fail(ctx, err)
 		return err
 	}
-	h.drain(ctx, drainOptions{})
+	h.drainOwned(ctx, drainOptions{flush: flush})
 	return nil
 }
 
@@ -311,11 +330,17 @@ type drainOptions struct {
 
 func (h *Handler) drain(ctx *channel.HandlerContext, opts drainOptions) {
 	h.draining.Add(1)
-	defer func() {
-		if h.draining.Add(-1) == 0 && h.hasQueuedDrain() {
-			h.scheduleDrain()
-		}
-	}()
+	defer h.finishDrain()
+	h.drainOwned(ctx, opts)
+}
+
+func (h *Handler) finishDrain() {
+	if h.draining.Add(-1) == 0 && h.hasQueuedDrain() {
+		h.scheduleDrain()
+	}
+}
+
+func (h *Handler) drainOwned(ctx *channel.HandlerContext, opts drainOptions) {
 	if !h.started.Load() || h.raw == nil {
 		if opts.flush {
 			_ = ctx.Flush()
@@ -328,6 +353,7 @@ func (h *Handler) drain(ctx *channel.HandlerContext, opts drainOptions) {
 	}
 	readComplete := false
 	plainPending := opts.plain
+	flushed := false
 	for {
 		drained := false
 		for {
@@ -336,11 +362,13 @@ func (h *Handler) drain(ctx *channel.HandlerContext, opts drainOptions) {
 				break
 			}
 			drained = true
-			if err := h.writeCipher(ctx, &chunk); err != nil {
+			combineFlush := opts.flush && h.handshakeComplete.Load() && !h.raw.hasOutput()
+			if err := h.writeCipher(ctx, &chunk, combineFlush); err != nil {
 				chunk.releaseOwned()
 				h.fail(ctx, err)
 				return
 			}
+			flushed = combineFlush
 		}
 		select {
 		case event := <-h.events:
@@ -406,7 +434,7 @@ func (h *Handler) drain(ctx *channel.HandlerContext, opts drainOptions) {
 	if readComplete {
 		ctx.FireChannelReadComplete()
 	}
-	if opts.flush {
+	if opts.flush && !flushed {
 		_ = ctx.Flush()
 	}
 }
@@ -457,12 +485,18 @@ func (h *Handler) readPlain(ctx *channel.HandlerContext) (bool, error) {
 	}
 }
 
-func (h *Handler) writeCipher(ctx *channel.HandlerContext, chunk *byteChunk) error {
+func (h *Handler) writeCipher(ctx *channel.HandlerContext, chunk *byteChunk, flush bool) error {
 	out := ownedBufferFromChunk(chunk)
 	if out == nil {
 		return nil
 	}
-	if err := ctx.Write(out); err != nil {
+	var err error
+	if flush {
+		err = ctx.WriteAndFlush(out)
+	} else {
+		err = ctx.Write(out)
+	}
+	if err != nil {
 		if out.RefCnt() > 0 {
 			out.Release()
 		}
