@@ -9,12 +9,7 @@ func ownedBufferFromChunk(chunk *byteChunk) buffer.ByteBuf {
 		return nil
 	}
 	data := chunk.data
-	owner := chunk.owner
-	release := chunk.release
+	pool := chunk.pool
 	*chunk = byteChunk{}
-	return buffer.NewOwnedBuffer(data, func([]byte) {
-		if release != nil && owner != nil {
-			release(owner)
-		}
-	})
+	return buffer.NewOwnedBufferWithReleaser(data, pool)
 }

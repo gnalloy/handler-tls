@@ -127,22 +127,21 @@ func releaseBytes(pool BytePool, buf []byte) {
 }
 
 type byteChunk struct {
-	data    []byte
-	owner   []byte
-	release func([]byte)
+	data []byte
+	pool BytePool
 }
 
 func newByteChunk(data []byte, pool BytePool) byteChunk {
 	if pool == nil {
 		pool = defaultBytePool
 	}
-	return byteChunk{data: data, owner: data, release: pool.Release}
+	return byteChunk{data: data, pool: pool}
 }
 
 func (c *byteChunk) releaseOwned() {
-	if c == nil || c.owner == nil || c.release == nil {
+	if c == nil || c.data == nil || c.pool == nil {
 		return
 	}
-	c.release(c.owner)
+	c.pool.Release(c.data)
 	*c = byteChunk{}
 }
