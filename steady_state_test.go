@@ -40,6 +40,9 @@ func TestHandlerReadsApplicationDataSynchronouslyAfterHandshake(t *testing.T) {
 	if got := recorder.String(); got != "plain" {
 		t.Fatalf("plaintext=%q reads=%d, want plain", got, conn.reads)
 	}
+	if conn.reads != 2 {
+		t.Fatalf("reads=%d, want one data read and one would-block read", conn.reads)
+	}
 }
 
 func newSteadyStateHandler(t *testing.T, conn Conn, inbound channel.Handler) (*Handler, channel.Channel) {

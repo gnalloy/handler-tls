@@ -327,6 +327,7 @@ func (h *Handler) drain(ctx *channel.HandlerContext, opts drainOptions) {
 		deadline = time.Now().Add(drainWaitTimeout)
 	}
 	readComplete := false
+	plainPending := opts.plain
 	for {
 		drained := false
 		for {
@@ -363,7 +364,8 @@ func (h *Handler) drain(ctx *channel.HandlerContext, opts drainOptions) {
 			return
 		default:
 		}
-		if opts.plain && h.handshakeComplete.Load() {
+		if plainPending && h.handshakeComplete.Load() {
+			plainPending = false
 			read, err := h.readPlain(ctx)
 			if err != nil {
 				h.fail(ctx, err)
