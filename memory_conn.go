@@ -6,6 +6,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"gnalloy.org/gnalloy/buffer"
 )
 
 var errWouldBlock error = errWouldBlockError{}
@@ -24,13 +26,13 @@ func (errWouldBlockError) Is(target error) bool {
 type memoryConn struct {
 	inMu        sync.Mutex
 	inCond      *sync.Cond
-	in          []byteChunk
+	in          []buffer.ByteBuf
 	inHead      int
 	closed      bool
 	once        sync.Once
 	pool        BytePool
 	notify      func()
-	pending     byteChunk
+	pending     buffer.ByteBuf
 	out         ciphertextQueue
 	nonblocking atomic.Bool
 }
@@ -55,14 +57,25 @@ func (c *memoryConn) feedOwned(data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
-	chunk := newByteChunk(data, c.pool)
+	return c.feedBuffer(buffer.NewOwnedBuffer(data, c.pool.Release))
+}
+
+// feedBuffer 接管密文 ByteBuf；成功、失败或关闭路径都会负责最终释放。
+func (c *memoryConn) feedBuffer(buf buffer.ByteBuf) error {
+	if buf == nil {
+		return nil
+	}
+	if buf.ReadableBytes() == 0 {
+		buf.Release()
+		return nil
+	}
 	c.inMu.Lock()
 	if c.closed {
 		c.inMu.Unlock()
-		chunk.releaseOwned()
+		buf.Release()
 		return io.ErrClosedPipe
 	}
-	c.in = append(c.in, chunk)
+	c.in = append(c.in, buf)
 	c.inCond.Signal()
 	c.inMu.Unlock()
 	return nil
@@ -71,10 +84,10 @@ func (c *memoryConn) feedOwned(data []byte) error {
 func (c *memoryConn) Read(dst []byte) (int, error) {
 	c.inMu.Lock()
 	defer c.inMu.Unlock()
-	for len(c.pending.data) == 0 {
+	for c.pending == nil || c.pending.ReadableBytes() == 0 {
 		if c.inHead < len(c.in) {
 			c.pending = c.in[c.inHead]
-			c.in[c.inHead] = byteChunk{}
+			c.in[c.inHead] = nil
 			c.inHead++
 			if c.inHead == len(c.in) {
 				c.in = c.in[:0]
@@ -90,12 +103,12 @@ func (c *memoryConn) Read(dst []byte) (int, error) {
 		}
 		c.inCond.Wait()
 	}
-	n := copy(dst, c.pending.data)
-	c.pending.data = c.pending.data[n:]
-	if len(c.pending.data) == 0 {
-		c.pending.releaseOwned()
+	n, err := c.pending.Read(dst)
+	if c.pending.ReadableBytes() == 0 {
+		c.pending.Release()
+		c.pending = nil
 	}
-	return n, nil
+	return n, err
 }
 
 func (c *memoryConn) Write(src []byte) (int, error) {
@@ -115,15 +128,21 @@ func (c *memoryConn) Close() error {
 	c.once.Do(func() {
 		c.inMu.Lock()
 		c.closed = true
-		c.pending.releaseOwned()
+		pending := c.pending
+		c.pending = nil
 		queued := c.in
 		head := c.inHead
 		c.in = nil
 		c.inHead = 0
 		c.inCond.Broadcast()
 		c.inMu.Unlock()
+		if pending != nil {
+			pending.Release()
+		}
 		for i := head; i < len(queued); i++ {
-			queued[i].releaseOwned()
+			if queued[i] != nil {
+				queued[i].Release()
+			}
 		}
 	})
 	return nil

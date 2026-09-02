@@ -141,9 +141,7 @@ func (h *Handler) ChannelRead(ctx *channel.HandlerContext, msg any) {
 		return
 	}
 	h.ensureStarted()
-	data := copyReadableBytes(buf, h.bytePool)
-	buf.Release()
-	err := h.raw.feedOwned(data)
+	err := h.raw.feedBuffer(buf)
 	if err != nil {
 		h.fail(ctx, err)
 		return

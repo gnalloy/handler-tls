@@ -1,76 +1,12 @@
 package tls
 
 import (
-	"bytes"
 	"errors"
 	"net"
 	"testing"
 
 	"gnalloy.org/gnalloy/buffer"
 )
-
-func TestCopyReadableBytesCopiesCompositeOnce(t *testing.T) {
-	first := buffer.NewHeapBuffer(2)
-	second := buffer.NewHeapBuffer(2)
-	_, _ = first.WriteBytes([]byte("ab"))
-	_, _ = second.WriteBytes([]byte("cd"))
-	composite := buffer.NewCompositeByteBuf()
-	composite.Append(first)
-	composite.Append(second)
-	defer composite.Release()
-
-	data := copyReadableBytes(composite, nil)
-	if string(data) != "abcd" {
-		t.Fatalf("data=%q, want abcd", data)
-	}
-	releaseBytes(defaultBytePool, data)
-}
-
-func TestCopyReadableBytesUsesConfiguredPool(t *testing.T) {
-	pool := &trackingBytePool{}
-	buf := buffer.NewHeapBuffer(4)
-	_, _ = buf.WriteBytes([]byte("pool"))
-	defer buf.Release()
-
-	data := copyReadableBytes(buf, pool)
-	if string(data) != "pool" {
-		t.Fatalf("data=%q, want pool", data)
-	}
-	if pool.acquired != 1 || pool.released != 0 {
-		t.Fatalf("pool acquired=%d released=%d before release", pool.acquired, pool.released)
-	}
-	releaseBytes(pool, data)
-	if pool.released != 1 {
-		t.Fatalf("pool released=%d, want 1", pool.released)
-	}
-}
-
-func BenchmarkCopyReadableBytesComposite(b *testing.B) {
-	first := buffer.NewHeapBuffer(1024)
-	second := buffer.NewHeapBuffer(1024)
-	_, _ = first.WriteBytes(bytes.Repeat([]byte("a"), 1024))
-	_, _ = second.WriteBytes(bytes.Repeat([]byte("b"), 1024))
-	composite := buffer.NewCompositeByteBuf()
-	composite.Append(first)
-	composite.Append(second)
-	defer composite.Release()
-
-	pool := NewPooledBytePool(BytePoolConfig{
-		DefaultSize: 2048,
-		MaxSize:     2048,
-	})
-	warm := pool.Acquire(2048)
-	pool.Release(warm)
-
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		data := copyReadableBytes(composite, pool)
-		if len(data) != 2048 {
-			b.Fatalf("len=%d, want 2048", len(data))
-		}
-		releaseBytes(pool, data)
-	}
-}
 
 func TestMemoryConnReleasesInputAfterRead(t *testing.T) {
 	pool := &trackingBytePool{}
@@ -92,6 +28,26 @@ func TestMemoryConnReleasesInputAfterRead(t *testing.T) {
 	}
 	if pool.released != 1 {
 		t.Fatalf("released=%d, want input chunk released", pool.released)
+	}
+}
+
+func TestMemoryConnTakesByteBufOwnershipWithoutCopy(t *testing.T) {
+	conn := newMemoryConn(nil, nil)
+	buf := buffer.NewHeapBuffer(4)
+	_, _ = buf.WriteBytes([]byte("data"))
+	if err := conn.feedBuffer(buf); err != nil {
+		t.Fatal(err)
+	}
+	if buf.RefCnt() != 1 {
+		t.Fatalf("ref=%d before read, want 1", buf.RefCnt())
+	}
+
+	var dst [4]byte
+	if n, err := conn.Read(dst[:]); err != nil || n != 4 || string(dst[:]) != "data" {
+		t.Fatalf("read n=%d err=%v data=%q", n, err, string(dst[:]))
+	}
+	if buf.RefCnt() != 0 {
+		t.Fatalf("ref=%d after read, want released", buf.RefCnt())
 	}
 }
 
