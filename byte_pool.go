@@ -28,7 +28,8 @@ type BytePoolConfig struct {
 
 // PooledBytePool 是基于 sync.Pool 的 TLS 临时字节池。
 type PooledBytePool struct {
-	pool          sync.Pool
+	pools         [bytePoolClassCount]sync.Pool
+	fallback      sync.Pool
 	defaultSize   int
 	maxSize       int
 	zeroOnRelease bool
@@ -54,7 +55,7 @@ func NewPooledBytePool(cfg BytePoolConfig) *PooledBytePool {
 		maxSize:       maxSize,
 		zeroOnRelease: cfg.ZeroOnRelease,
 	}
-	p.pool.New = func() any {
+	p.fallback.New = func() any {
 		return make([]byte, defaultSize)
 	}
 	return p
@@ -68,7 +69,14 @@ func (p *PooledBytePool) Acquire(size int) []byte {
 	if p == nil {
 		return make([]byte, size)
 	}
-	buf := p.pool.Get().([]byte)
+	targetSize := size
+	if targetSize < p.defaultSize {
+		targetSize = p.defaultSize
+	}
+	if class := bytePoolClass(targetSize, p.maxSize); class >= 0 {
+		return p.acquireClass(class, size)
+	}
+	buf := p.fallback.Get().([]byte)
 	if cap(buf) < size {
 		return make([]byte, size)
 	}
@@ -83,11 +91,15 @@ func (p *PooledBytePool) Release(buf []byte) {
 	if p.zeroOnRelease {
 		clear(buf[:cap(buf)])
 	}
+	if class := bytePoolExactClass(cap(buf)); class >= 0 && cap(buf) <= p.maxSize {
+		p.releaseClass(class, buf)
+		return
+	}
 	size := p.defaultSize
 	if cap(buf) < size {
 		size = cap(buf)
 	}
-	p.pool.Put(buf[:size])
+	p.fallback.Put(buf[:size])
 }
 
 func normalizeBytePool(pool BytePool) BytePool {
