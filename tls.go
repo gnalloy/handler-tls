@@ -311,7 +311,6 @@ func (h *Handler) runHandshake() {
 	if emitOCSPEvent {
 		h.events <- ocspEvent
 	}
-	h.raw.setNonblocking()
 	h.notifyDrain()
 }
 
@@ -442,6 +441,7 @@ func (h *Handler) drainOwned(ctx *channel.HandlerContext, opts drainOptions) {
 func (h *Handler) finishHandshake() error {
 	h.handshake = true
 	buffers := h.pendingApplication.markReady()
+	h.raw.setNonblocking()
 	h.handshakeComplete.Store(true)
 	for i, buf := range buffers {
 		if err := h.writeApplication(buf); err != nil {

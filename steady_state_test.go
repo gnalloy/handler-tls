@@ -8,6 +8,17 @@ import (
 	"gnalloy.org/gnalloy/channel"
 )
 
+func TestFinishHandshakeEnablesNonblockingInput(t *testing.T) {
+	handler := newHandler(ModeServer, Config{StartTLS: true})
+	handler.raw = newMemoryConn(handler.bytePool, handler.notifyDrain)
+	if err := handler.finishHandshake(); err != nil {
+		t.Fatal(err)
+	}
+	if !handler.raw.nonblocking.Load() {
+		t.Fatal("nonblocking input was not enabled")
+	}
+}
+
 func TestHandlerWritesApplicationDataSynchronouslyAfterHandshake(t *testing.T) {
 	conn := &steadyStateConn{}
 	handler, ch := newSteadyStateHandler(t, conn, nil)
