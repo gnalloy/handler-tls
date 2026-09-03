@@ -3,26 +3,38 @@ package tls
 import (
 	"io"
 	"sync"
+	"sync/atomic"
 
 	"gnalloy.org/gnalloy/buffer"
+)
+
+const (
+	applicationQueuePending uint32 = iota
+	applicationQueueReady
+	applicationQueueClosed
 )
 
 // applicationQueue 只保存握手完成前的应用数据，并在切换稳态时一次性交接所有权。
 type applicationQueue struct {
 	mu      sync.Mutex
 	buffers []buffer.ByteBuf
-	ready   bool
-	closed  bool
+	state   atomic.Uint32
 }
 
 func (q *applicationQueue) enqueue(buf buffer.ByteBuf) (bool, error) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if q.closed {
+	switch q.state.Load() {
+	case applicationQueueReady:
+		return false, nil
+	case applicationQueueClosed:
 		return false, io.ErrClosedPipe
 	}
-	if q.ready {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	switch q.state.Load() {
+	case applicationQueueReady:
 		return false, nil
+	case applicationQueueClosed:
+		return false, io.ErrClosedPipe
 	}
 	q.buffers = append(q.buffers, buf)
 	return true, nil
@@ -30,18 +42,22 @@ func (q *applicationQueue) enqueue(buf buffer.ByteBuf) (bool, error) {
 
 func (q *applicationQueue) markReady() []buffer.ByteBuf {
 	q.mu.Lock()
-	q.ready = true
+	if q.state.Load() == applicationQueueClosed {
+		q.mu.Unlock()
+		return nil
+	}
 	buffers := q.buffers
 	q.buffers = nil
+	q.state.Store(applicationQueueReady)
 	q.mu.Unlock()
 	return buffers
 }
 
 func (q *applicationQueue) close() []buffer.ByteBuf {
 	q.mu.Lock()
-	q.closed = true
 	buffers := q.buffers
 	q.buffers = nil
+	q.state.Store(applicationQueueClosed)
 	q.mu.Unlock()
 	return buffers
 }

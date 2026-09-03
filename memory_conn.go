@@ -152,7 +152,7 @@ func (c *memoryConn) setNonblocking() {
 	c.nonblocking.Store(true)
 }
 
-func (c *memoryConn) popOutput() (byteChunk, bool) {
+func (c *memoryConn) popOutput() (byteChunk, bool, bool) {
 	return c.out.pop()
 }
 

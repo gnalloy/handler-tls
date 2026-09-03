@@ -357,12 +357,12 @@ func (h *Handler) drainOwned(ctx *channel.HandlerContext, opts drainOptions) {
 	for {
 		drained := false
 		for {
-			chunk, ok := h.raw.popOutput()
+			chunk, remaining, ok := h.raw.popOutput()
 			if !ok {
 				break
 			}
 			drained = true
-			combineFlush := opts.flush && h.handshakeComplete.Load() && !h.raw.hasOutput()
+			combineFlush := opts.flush && h.handshakeComplete.Load() && !remaining
 			if err := h.writeCipher(ctx, &chunk, combineFlush); err != nil {
 				chunk.releaseOwned()
 				h.fail(ctx, err)
